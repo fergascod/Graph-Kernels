@@ -1,0 +1,615 @@
+---
+title: "Coloring graphs"
+author: "Fernando Gastón, Marc Gàllego i Aleix Seguí"
+date: "12/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Welcome to some coloring.
+
+Load libraries.
+
+```{r}
+library(igraph)
+library(graphkernels)
+library(kernlab)
+library(MASS)
+library(class)
+```
+
+## Dataset
+
+We load all label data
+
+```{r}
+labels <- read.csv2("data.csv")
+head(labels)
+```
+
+We can explore the dataset a little bit.
+
+```{r}
+table(labels$chromatic)
+```
+
+
+We can now examine the accuracy of the greedy
+
+```{r}
+N<-nrow(labels)
+greedyErr<-c()
+for (i in 1:N){
+  greedyErr<-c(greedyErr, labels$greedy[i]-labels$chromatic[i])
+}
+table(greedyErr)/N
+```
+
+
+Now load the graphs. Set the path accordingly.
+```{r,warning = FALSE}
+path <- "/Users/aleix/Desktop/coloring/data";
+setwd(paste(path,"graph_data/",sep=""))
+print(getwd())
+
+files <- dir(".", pattern =".GraphML");
+
+G <- list();
+for(i in 1:length(files)) {
+
+  G[[i]] <- read_graph(files[i], format="graphml");
+}
+```
+
+We can visualize the graph using plot function plot.
+```{r}
+plot(G[[11]])
+```
+
+We will compute the kernel matrix only once, including all the observations. This way, we can extract submatrices every time we need a subset of data. We will use this a lot during train-test split and cross-validation.
+
+Having read all graphs, we can calculate some kernels.
+
+# Train-test split
+
+We will now define the indices of the train-test split
+
+```{r}
+n <- round(N*0.7);
+train <- sample(1:N, n, replace=FALSE);
+labs <- labels$chromatic[train]
+Gs <- G[train]
+```
+
+And precompute needed kernel matrices.
+
+```{r,warning = FALSE}
+K_shpath <- CalculateShortestPathKernel(Gs);
+K_grw_01 <- CalculateGeometricRandomWalkKernel(Gs, par=0.01);
+K_grw_001 <- CalculateGeometricRandomWalkKernel(Gs, par=0.001); #
+K_grw_0001 <- CalculateGeometricRandomWalkKernel(Gs, par=0.0001);
+K_graphlet <- CalculateGraphletKernel(Gs, par=3);
+```
+
+
+
+# Chromatic number prediction
+
+In order to compare the performance of the models we will be training we code the following routine that implements k-fold cross-validation:
+
+```{r,warning = FALSE}
+# Data should be the list of graphs G defined earlier
+cvKsvm <- function(k, K, n, labels, svmParam, technique) {
+
+  #Shuffling Dataset
+  randomization<-c(1:n);
+  randomization<-sample(c(1:n));
+  labels<-labels[randomization];
+  K<-K[randomization, randomization];
+
+  errors<-c();
+  for (i in 0:(k-1)){ # k-fold cross-validation
+    #Split into train and test set
+    testindx<-(n*i/k+1):(n*(i+1)/k);
+    trainindx<-setdiff(1:n, testindx);
+    test_labels<-labels[testindx];
+    train_labels<-labels[trainindx];
+
+    #Train model
+    if (technique=="Classification"){
+     model <- ksvm(as.kernelMatrix(K[trainindx, trainindx]), y=train_labels, type='C-svc', C=svmParam);
+    }else if (technique=="Regression"){
+      model <- ksvm(as.kernelMatrix(K[trainindx, trainindx]), y=train_labels, type='eps-svr', epsilon=svmParam);
+    }
+
+    #Test model
+    # https://stackoverflow.com/questions/1753299/help-using-predict-for-kernlabs-svm-in-r
+    testK<-K[testindx, trainindx]; #Get similarities of test graphs with train graphs
+    thistest<-as.kernelMatrix(testK[,SVindex(model)]);
+    (prediction<-predict(model, thistest, type="response"));
+
+    if (technique=="Classification"){
+     err <- sum(test_labels != prediction)/length(prediction);  # 1 - accuracy
+    }else if (technique=="Regression"){
+      err <- sqrt(sum((prediction - test_labels)^2)/length(prediction)); # RMSE
+    }
+
+    errors<-c(errors, err);
+  }
+
+  CVerror <- mean(errors);
+  return (CVerror);
+}
+```
+
+
+Compute error for every combination hyperparameter-algorithm
+
+```{r}
+errs <- c();
+epsilons <- c(1, 0.1, 0.01);
+for(epsilon in epsilons) {
+  err <- cvKsvm(3, K_shpath, n, labs, epsilon, "Regression")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+```{r}
+errs <- c();
+for(epsilon in epsilons) {
+  err <- cvKsvm(3, K_grw_01, n, labs, epsilon, "Regression")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_01<- errs;
+
+errs <- c();
+for(epsilon in epsilons) {
+  err <- cvKsvm(3, K_grw_001, n, labs, epsilon, "Regression")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_001<- errs;
+
+errs <- c();
+for(epsilon in epsilons) {
+  err <- cvKsvm(3, K_grw_0001, n, labs, epsilon, "Regression")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_0001<- errs;
+
+combos <- rbind(errs_grw_01, errs_grw_001, errs_grw_0001)
+rownames(combos) <- c(0.01, 0.001, 0.0001);
+combos
+```
+
+```{r}
+errs <- c();
+epsilons <- c(1, 0.1, 0.01);
+for(epsilon in epsilons) {
+  err <- cvKsvm(3, K_graphlet, n, labs, epsilon, "Regression")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+
+We found that the best combinations are the following:
+0.1 - Shpath
+0.01-0.01 GeomRandWalk
+
+We can now visualize the error in giving the chromatic number using regression (rounding).
+
+
+```{r}
+m1 <- ksvm(as.kernelMatrix(K_shpath), y=labs, type='eps-svr', epsilon=0.1);
+m2 <- ksvm(as.kernelMatrix(K_grw_01), y=labs, type='eps-svr', epsilon=0.01);
+m1.5 <- ksvm(as.kernelMatrix(K_graphlet), y=labs, type='eps-svr', epsilon=0.1);
+
+pred1<-predict(m1, as.kernelMatrix(K_shpath[,SVindex(m1)]), type="response");
+pred2<-predict(m2, as.kernelMatrix(K_grw_01[,SVindex(m2)]), type="response");
+pred1.5<-predict(m1.5, as.kernelMatrix(K_graphlet[,SVindex(m1.5)]), type="response");
+
+hist(labs-pred1, breaks=20)
+hist(labs-pred2, breaks=20)
+
+(err1 <- sum(round(pred1) != labs)/n)
+(err2 <- sum(round(pred2) != labs)/n)
+(err1.5 <- sum(round(pred1.5) != labs)/n)
+```
+
+
+# Classification
+
+Compute error for every combination hyperparameter-algorithm. We use 3-fold crossvalidation.
+
+```{r}
+errs <- c();
+Cs <- c(1, 0.1, 0.01);
+for(C in Cs) {
+  err <- cvKsvm(3, K_shpath, n, labs, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+```{r}
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_01, n, labs, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_01<- errs;
+
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_001, n, labs, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_001<- errs;
+
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_0001, n, labs, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_0001<- errs;
+
+combos <- rbind(errs_grw_01, errs_grw_001, errs_grw_0001)
+rownames(combos) <- c(0.01, 0.001, 0.0001);
+combos
+```
+
+```{r}
+errs <- c();
+Cs <- c(1, 0.1, 0.01);
+for(C in Cs) {
+  err <- cvKsvm(3, K_graphlet, n, labs, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+We find that the best are
+0.01-ShPath.
+0.01-0.1 GeomRandWalk:
+0.001-1 GeomRandWalk:
+
+Now let's compare the in-class performance.
+
+```{r}
+m3 <- ksvm(as.kernelMatrix(K_grw_01), y=labs, type='C-svc', C=0.01);
+m4 <- ksvm(as.kernelMatrix(K_graphlet), y=labs, type='C-svc', C=1);
+m4.5 <- ksvm(as.kernelMatrix(K_shpath), y=labs, type='C-svc', C=0.01);
+
+pred3<-predict(m3, as.kernelMatrix(K_grw_01[,SVindex(m3)]), type="response");
+pred4<-predict(m4, as.kernelMatrix(K_graphlet[,SVindex(m4)]), type="response");
+pred4.5<-predict(m4.5, as.kernelMatrix(K_shpath[,SVindex(m4.5)]), type="response");
+```
+
+Compute marginal prediction errors.
+
+```{r}
+(t1 <- table(round(pred1), labs))
+(t2 <- table(round(pred2), labs))
+(t3 <- table(pred3, labs))
+(t4 <- table(pred4, labs))
+
+1-diag(t1)/apply(t1, 2, sum)
+1-diag(t2[2:5,])/apply(t3, 2, sum)[1:4]
+1-diag(t3)/apply(t3, 2, sum)[1:4]
+1-diag(t4)/apply(t4, 2, sum)[1:4]
+
+```
+
+We see that the regression method is superior.
+
+# 3-coloring
+
+First, select 3-colorable labels and rename.
+
+```{r}
+labs3 <- integer(dim(labels)[1]);
+labs3[labels$chromatic == 3] <- 1;
+labs3[labels$chromatic != 3] <- 0;
+labs3 <- labs3[train]
+```
+
+Now, make the dataset a bit more balanced. (drop data)
+
+```{r}
+table(labs3)
+count <- sum(labs3==1)
+selection <- c(which(labs3 == 1), sample(which(labs3 == 0), count, replace=F))
+labs3 <- labs3[selection]
+n3 <- length(labs3)
+table(labs3)
+```
+
+By using the same random split as in the previous section, we can reuse the kernel matrices.
+Compute error for every combination hyperparameter-algorithm. We use 3-fold crossvalidation.
+
+```{r}
+errs <- c();
+Cs <- c(1, 0.1, 0.01);
+for(C in Cs) {
+  err <- cvKsvm(3, K_shpath[selection, selection], n3, labs3, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+```{r}
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_01[selection, selection], n3, labs3, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_01<- errs;
+
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_001[selection, selection], n3, labs3, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_001<- errs;
+
+errs <- c();
+for(C in Cs) {
+  err <- cvKsvm(3, K_grw_0001[selection, selection], n3, labs3, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+errs_grw_0001<- errs;
+
+combos <- rbind(errs_grw_01, errs_grw_001, errs_grw_0001)
+rownames(combos) <- c(0.01, 0.001, 0.0001);
+combos
+```
+
+```{r}
+errs <- c();
+Cs <- c(1, 0.1, 0.01);
+for(C in Cs) {
+  err <- cvKsvm(3, K_graphlet[selection, selection], n3, labs3, C, "Classification")
+  errs <- c(errs, err);
+}
+names(errs) <- epsilons;
+(errs_shpath <- errs)
+```
+
+best combinations are
+0.01-shpath
+0.01-0.1 GeomRandWalk
+
+
+# Kernel Principal Components Analysis
+
+```{r}
+kpc1 <- kpca(as.kernelMatrix(K_shpath))
+par(mfrow = c(1, 2))
+plot(rotated(kpc1),col=as.integer(labs),
+     xlab="Index",ylab="1st Principal Component", main="ShortestPath (Chromatic Num)")
+plot(rotated(kpc1),col=as.integer(labels$n[train]),
+     xlab="Index",ylab="1st Principal Component", main="ShortestPath (Num Vertices)")
+eig(kpc1)
+
+kpc2 <- kpca(as.kernelMatrix(K_grw_01))
+plot(rotated(kpc2),col=as.integer(labs),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.01) \n (Chromatic Num)")
+plot(rotated(kpc2),col=as.integer(labels$n[train]),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.01) \n (Num Vertices)")
+eig(kpc2)
+
+kpc3 <- kpca(as.kernelMatrix(K_grw_001))
+plot(rotated(kpc3),col=as.integer(labs),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.001) \n (Chromatic Num)")
+plot(rotated(kpc3),col=as.integer(labels$n[train]),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.001) \n (Num Vertices)")
+eig(kpc3)
+
+kpc4 <- kpca(as.kernelMatrix(K_grw_0001))
+plot(rotated(kpc4),col=as.integer(labs),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.0001) \n (Chromatic Num)")
+plot(rotated(kpc4),col=as.integer(labels$n[train]),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="GeomRandWalk (0.0001) \n (Num Vertices)")
+eig(kpc4)
+
+kpc5 <- kpca(as.kernelMatrix(K_graphlet))
+plot(rotated(kpc5),col=as.integer(labs),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="Graphlet (Chromatic Num)")
+plot(rotated(kpc5),col=as.integer(labels$n[train]),
+     xlab="1st Principal Component",ylab="2nd Principal Component", main="Graphlet (Num Vertices)")
+eig(kpc5)
+```
+
+We can now compute the percentage of explained variance.
+
+```{r}
+sum(eig(kpc1)[1])/sum(eig(kpc1))
+sum(eig(kpc2)[1:2])/sum(eig(kpc2))
+sum(eig(kpc3)[1:2])/sum(eig(kpc3))
+sum(eig(kpc4)[1:2])/sum(eig(kpc3))
+sum(eig(kpc5)[1:2])/sum(eig(kpc5))
+```
+
+
+# Feature extraction
+
+We can now try to use traditional Machine Learning algorithms from vector data extracted using KPCA. Additionally, we can include information from labels such as "n". We will use GeomRandWalk because it has the best shape.
+
+```{r}
+features <- as.matrix(cbind(rotated(kpc2), labels$n[train]));
+```
+
+Train some models and create the cross-validation function.
+
+```{r}
+# Data should be the list of graphs G defined earlier
+cvKfeat <- function(k, features, labels, svmParam, technique) {
+
+  #Shuffling Dataset
+  randomization<-c(1:n);
+  randomization<-sample(c(1:n));
+  features <- features[randomization, ]
+  labels<-labels[randomization];
+
+  errors<-c();
+  for (i in 0:(k-1)){ # k-fold cross-validation
+    #Split into train and test set
+    testindx<-(n*i/k+1):(n*(i+1)/k);
+    trainindx<-setdiff(1:n, testindx);
+    test_labels<-labels[testindx];
+    train_labels<-labels[trainindx];
+
+    #Train model
+    if (technique=="lda"){
+     mod.lda <- lda(features[trainindx,], labels[trainindx]);
+     pred.lda <- predict(mod.lda, newdata=features[testindx,])$class;
+     err <- sum(pred.lda != labels[testindx])/length(testindx);
+    }else if (technique=="knn"){
+      pred.knn <- knn(features[trainindx,], features[testindx,], labels[trainindx], k = svmParam)
+      err <- sum(pred.knn != labels[testindx])/length(testindx);
+    }
+
+    errors<-c(errors, err);
+  }
+
+  CVerror <- mean(errors);
+  return (CVerror);
+}
+```
+
+Now compute the 3-cv error for the two selected methods.
+```{r}
+"lda"
+cvKfeat(3, features, labs, F, "lda")
+
+ks <- c(3, 5, 11, 15)
+errs <- c()
+for(k in ks) {
+  errs <- c(errs, cvKfeat(3, features, labs, k, "knn"))
+}
+names(errs) <- ks
+"knn"
+errs
+```
+
+We can now use the lambda=0.001 matrix and repeat the computations.
+
+```{r}
+kpc3 <- kpca(as.kernelMatrix(K_grw_001));
+features <- as.matrix(cbind(rotated(kpc3), labels$n[train]));
+
+"lda"
+cvKfeat(3, features, labs, F, "lda")
+
+ks <- c(3, 5, 11, 15)
+errs <- c()
+for(k in ks) {
+  errs <- c(errs, cvKfeat(3, features, labs, k, "knn"))
+}
+names(errs) <- ks
+"knn"
+errs
+```
+
+
+Works similarly to other methods. Works very good.
+
+Now to 3-colorability.
+
+```{r}
+features3 <- features[selection,]
+va3 <- sample(n3, round(n3*0.3))
+mod.lda3 <- lda(features3[-va3,], labs3[-va3])
+pred.lda3 <- predict(mod.lda3, newdata=features3[va3,])$class
+
+sum(pred.lda3 != labs3[va3])/length(va3)
+table(pred.lda3, labs3[va3])
+```
+About the same result. This tells us that applying kernel methods directly is as good as
+trying traditional methods with kernel-obtained features.
+
+
+# Generalization check
+
+Use models on test data. Here we will need to recompute the matrix.
+
+# Regression
+
+```{r, warning=FALSE}
+K <- CalculateGeometricRandomWalkKernel(G, par=0.01);
+model <- ksvm(as.kernelMatrix(K[train, train]), y=labs, type='eps-svr', epsilon=0.01);
+
+testK<-K[-train, train];
+thistest<-as.kernelMatrix(testK[,SVindex(model)]);
+pred<-round(predict(model, thistest, type="response"));
+
+sum(pred != labels$chromatic[-train])/(N-n)
+```
+
+With feature extraction
+
+```{r}
+kpc <- kpca(as.kernelMatrix(K));
+features <- as.matrix(cbind(rotated(kpc)[1:364,], labels$n));
+pred.knn <- knn(features[train,], features[-train,], labs, k = 3);
+sum(pred.knn != labels$chromatic[-train])/length(pred.knn)
+```
+
+# Classification
+```{r, warning=F}
+#K <- CalculateGeometricRandomWalkKernel(G, par=0.01);
+model <- ksvm(as.kernelMatrix(K[train, train]), y=labs, type='C-svc', epsilon=0.1);
+
+testK<-K[-train, train];
+thistest<-as.kernelMatrix(testK[,SVindex(model)]);
+pred<-round(predict(model, thistest, type="response"));
+
+sum(pred != labels$chromatic[-train])/(N-n)
+```
+
+## 3-colorability
+
+Now, get test labels.
+```{r}
+labs3 <- integer(dim(labels)[1]);
+labs3[labels$chromatic == 3] <- 1;
+labs3[labels$chromatic != 3] <- 0;
+table(labs3)
+count <- sum(labs3==1)
+selection <- c(which(labs3 == 1), sample(which(labs3 == 0), count, replace=F))
+labs3 <- labs3[selection]
+n3 <- length(labs3)
+table(labs3)
+```
+
+And compute the test error
+```{r}
+train3 <- sample(n3, n3*0.7, replace=F);
+K3 <- K[selection, selection]
+model3 <- ksvm(as.kernelMatrix(K3[train3, train3]), y=labs3[train3], type='C-svc', C=1);
+
+testK3<-K3[-train3, train3];
+thistest3<-as.kernelMatrix(testK3[,SVindex(model3)]);
+pred3<-predict(model3, thistest3, type="response");
+sum(pred3 != labs3[-train3])/(length(pred3))
+
+```
